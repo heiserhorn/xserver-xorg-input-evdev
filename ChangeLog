@@ -1,3 +1,141 @@
+commit 891bfc56be3c45d085f4b6abd5bd265e82b8c353
+Author: Peter Hutterer <peter.hutterer@redhat.com>
+Date:   Tue Nov 18 17:16:33 2008 +1000
+
+    evdev 2.0.8
+    
+    Expect this to be the last 2.0.x release.
+
+commit 6626ad5cb9a9fab9bd3c3d8a36d8b09b8cb037a0
+Author: Julien Cristau <jcristau@debian.org>
+Date:   Tue Oct 21 19:21:21 2008 +0200
+
+    Fix TestBit() on 64bit
+    
+    Reported by Albert Damen <albrt@gmx.net>
+    X.Org Bug#18150 <http://bugs.freedesktop.org/show_bug.cgi?id=18150>
+    (cherry picked from commit f57e8face94c9e6986b35ca2ec231e284b9f58cf)
+
+commit ae247ff09cb77d8e6ebc4505b44731e32b3a179b
+Author: Peter Hutterer <peter.hutterer@redhat.com>
+Date:   Fri Oct 17 11:42:21 2008 +1030
+
+    evdev 2.0.7
+
+commit 46f2b83e0130da2260559ad63f75dbf9c00bb83c
+Author: Peter Hutterer <peter.hutterer@who-t.net>
+Date:   Thu Oct 16 22:35:42 2008 +1030
+
+    Don't post keycodes > 255.
+    
+    If we only have keys > 255 we don't set up a key class rec, so don't post
+    them. It makes the server unhappy.
+    
+    Signed-off-by: Julien Cristau <jcristau@debian.org>
+    (cherry picked from commit 7243116f55609a2a5f73bb88cf6ad6386c9bbc0b)
+
+commit d73a1732c6a2c093f76bdc5f32b3a53fdef92b15
+Author: Peter Hutterer <peter.hutterer@redhat.com>
+Date:   Tue Oct 14 17:02:43 2008 +1030
+
+    Fix "Device reopened after N attempts" message.
+    (cherry picked from commit 0089d931ac5fb290c82908da652b28c8b515d449)
+
+commit 8c332a836783b4f18b992253f4a94b694c9d0cf1
+Author: Julien Cristau <jcristau@debian.org>
+Date:   Sat Oct 11 02:10:48 2008 +0200
+
+    Set pInfo->fd to -1 on DEVICE_CLOSE
+    
+    This allows the reopen logic to kick in later.
+    DEVICE_CLOSE gets called on regen, so without this we'd keep a stale
+    file descriptor in pInfo->fd in subsequent sessions.
+    
+    Debian bug#496101 (http://bugs.debian.org/496101)
+    (cherry picked from commit b0b6399023bcdbb3337027f85c8da42d8b18c983)
+
+commit 91e30bb07cadb41c99b0515d8ecb49f7b045e90c
+Author: Peter Hutterer <peter.hutterer@redhat.com>
+Date:   Thu Oct 2 12:05:14 2008 +0930
+
+    evdev 2.0.6
+
+commit 36d9b9f166a700d47322961d1768a6b8d6d5545c
+Author: Peter Hutterer <peter.hutterer@redhat.com>
+Date:   Thu Oct 2 10:56:04 2008 +0930
+
+    Close fd on DEVICE_OFF. (LP #276887)
+    
+    Leaving the fd open means we still get keyboard events after VT switching
+    away. Coming back, some of these events are replayed on the application that
+    has the current focus.
+    
+    Reproduceable:
+    1. open terminal, focus.
+    2. VT switch away
+    3. type something, preferably a password
+    4. VT switch back, trigger a mouse event
+    5. Observe the X server guessing your password.
+    
+    Closing the fd on DEVICE_OFF fixes this. Reopen is handled by the reopen
+    code introduced with
+    
+        commit 9930477cbeb4acfd070ae70894d13ffabfc347b8
+        Author: Peter Hutterer <peter.hutterer@redhat.com>
+        Date:   Tue Aug 26 14:33:40 2008 +0930
+    
+            Attempt to re-open devices on read errors.
+    
+    Launchpad Bug 276887
+    <https://bugs.edge.launchpad.net/ubuntu/+source/xorg-server/+bug/276887>
+    (cherry picked from commit ccd48d2f50231e2837e0984833641ac79f327ba4)
+
+commit 69f01976f1ba36e995809d8a91e4010d7a0f56ba
+Author: Peter Hutterer <peter.hutterer@redhat.com>
+Date:   Fri Sep 19 09:32:08 2008 +0930
+
+    evdev 2.0.5
+
+commit 32768f8acd49f49a3daa7965fc2672ca13306780
+Author: Peter Hutterer <peter.hutterer@redhat.com>
+Date:   Thu Sep 4 18:41:13 2008 +0930
+
+    Attempt to re-open devices on read errors.
+    
+    Coming back from resume may leave us with a file descriptor that can be opened
+    but fails on the first read (ENODEV).
+    In this case, try to open the device until it becomes available or until the
+    predefined count expires. To be safe, we cache the information from the device
+    and compare against it when we re-open. This way we ensure that if the
+    topology changes under us, we don't open a completely different device. If a
+    device has changed, we disable it.
+    
+    Adds option "ReopenAttempts" <int>
+    
+    Conflicts:
+    
+    	man/evdev.man
+    	src/evdev.c
+    	src/evdev.h
+
+commit ed1382866c54ffa34e3d0352ad65414650497f78
+Author: Peter Hutterer <peter.hutterer@redhat.com>
+Date:   Thu Aug 14 23:17:16 2008 +0930
+
+    evdev 2.0.4
+
+commit 8fe38b228702bddebe26a6d2c5c170a2a91d6ebc
+Author: Adam Jackson <ajax@redhat.com>
+Date:   Thu Aug 7 09:21:26 2008 +0930
+
+    Print a warning if a keycode exceeds the range accepted by the server.
+    
+    Keycodes over 255 are silently ignored in the server. The least we can do is
+    put a warning in the logs.
+    
+    Signed-off-by: Peter Hutterer <peter.hutterer@who-t.net>
+    (cherry picked from commit c1f7f8c3d22ecae7839f82ea8b584069f54f1f5e)
+
 commit ef607b6cce8e1feb6632c6bc1e7f322095ce54d9
 Author: Julien Cristau <jcristau@debian.org>
 Date:   Mon Aug 4 09:16:53 2008 +0930

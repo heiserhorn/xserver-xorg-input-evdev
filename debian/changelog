@@ -1,3 +1,11 @@
+xserver-xorg-input-evdev (1:2.0.8-1) UNRELEASED; urgency=low
+
+  * New upstream release.
+    + close/reopen devices on VT switch and server restart, closes: #496101
+    + attempt to re-open devices on read errors, closes: #492146
+
+ -- Julien Cristau <jcristau@debian.org>  Wed, 26 Nov 2008 17:36:44 +0100
+
 xserver-xorg-input-evdev (1:2.0.3-1) unstable; urgency=low
 
   * New upstream release, incorporates the two fixes from our previous
