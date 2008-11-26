@@ -1,4 +1,4 @@
-xserver-xorg-input-evdev (1:2.0.8-1) UNRELEASED; urgency=low
+xserver-xorg-input-evdev (1:2.0.8-1) unstable; urgency=low
 
   * New upstream release.
     + close/reopen devices on VT switch and server restart, closes: #496101
@@ -6,7 +6,7 @@ xserver-xorg-input-evdev (1:2.0.8-1) UNRELEASED; urgency=low
   * debian/control: update long description.  The driver doesn't match on
     physical attributes of the device anymore.
 
- -- Julien Cristau <jcristau@debian.org>  Wed, 26 Nov 2008 17:36:44 +0100
+ -- Julien Cristau <jcristau@debian.org>  Wed, 26 Nov 2008 19:27:34 +0100
 
 xserver-xorg-input-evdev (1:2.0.3-1) unstable; urgency=low
 
