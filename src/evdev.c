@@ -73,6 +73,7 @@
 #define EVDEV_RELATIVE_EVENTS	(1 << 2)
 #define EVDEV_ABSOLUTE_EVENTS	(1 << 3)
 #define EVDEV_TOUCHPAD		(1 << 4)
+#define EVDEV_INITIALIZED	(1 << 5) /* WheelInit etc. called already? */
 
 #define MIN_KEYCODE 8
 #define GLYPHS_PER_KEY 2
@@ -95,6 +96,9 @@ static const char *evdevDefaults[] = {
     "XkbLayout",    "us",
     NULL
 };
+
+static int EvdevOn(DeviceIntPtr);
+static int EvdevCacheCompare(InputInfoPtr pInfo, Bool compare);
 
 static void
 SetXkbOption(InputInfoPtr pInfo, char *name, char **option)
@@ -131,6 +135,9 @@ PostButtonClicks(InputInfoPtr pInfo, int button, int count)
 static void
 PostKbdEvent(InputInfoPtr pInfo, struct input_event *ev, int value)
 {
+    int code = ev->code + MIN_KEYCODE;
+    static char warned[KEY_MAX];
+
     /* filter repeat events for chording keys */
     if (value == 2 &&
         (ev->code == KEY_LEFTCTRL || ev->code == KEY_RIGHTCTRL ||
@@ -141,7 +148,66 @@ PostKbdEvent(InputInfoPtr pInfo, struct input_event *ev, int value)
          ev->code == KEY_SCROLLLOCK)) /* XXX windows keys? */
         return;
 
-    xf86PostKeyboardEvent(pInfo->dev, ev->code + MIN_KEYCODE, value);
+    if (code > 255 && ev->code < KEY_MAX) {
+	if (!warned[ev->code])
+	    xf86Msg(X_WARNING, "%s: unable to handle keycode %d\n",
+		    pInfo->name, ev->code);
+	warned[ev->code] = 1;
+    }
+
+    /* The X server can't handle keycodes > 255 anyway, just drop them.  */
+    if (code > 255)
+        return;
+
+    xf86PostKeyboardEvent(pInfo->dev, code, value);
+}
+
+/**
+ * Coming back from resume may leave us with a file descriptor that can be
+ * opened but fails on the first read (ENODEV).
+ * In this case, try to open the device until it becomes available or until
+ * the predefined count expires.
+ */
+static CARD32
+EvdevReopenTimer(OsTimerPtr timer, CARD32 time, pointer arg)
+{
+    InputInfoPtr pInfo = (InputInfoPtr)arg;
+    EvdevPtr pEvdev = pInfo->private;
+
+    do {
+        pInfo->fd = open(pEvdev->device, O_RDWR, 0);
+    } while (pInfo->fd < 0 && errno == EINTR);
+
+    if (pInfo->fd != -1)
+    {
+        if (EvdevCacheCompare(pInfo, TRUE) == Success)
+        {
+            xf86Msg(X_INFO, "%s: Device reopened after %d attempts.\n", pInfo->name,
+                    pEvdev->reopen_attempts - pEvdev->reopen_left + 1);
+            EvdevOn(pInfo->dev);
+        } else
+        {
+            xf86Msg(X_ERROR, "%s: Device has changed - disabling.\n",
+                    pInfo->name);
+            DisableDevice(pInfo->dev);
+            close(pInfo->fd);
+            pInfo->fd = -1;
+        }
+        pEvdev->reopen_left = 0;
+        return 0;
+    }
+
+    pEvdev->reopen_left--;
+
+    if (!pEvdev->reopen_left)
+    {
+        xf86Msg(X_ERROR, "%s: Failed to reopen device after %d attempts.\n",
+                pInfo->name, pEvdev->reopen_attempts);
+        DisableDevice(pInfo->dev);
+        return 0;
+    }
+
+    return 100; /* come back in 100 ms */
 }
 
 static void
@@ -163,6 +229,15 @@ EvdevReadInput(InputInfoPtr pInfo)
             /* The kernel promises that we always only read a complete
              * event, so len != sizeof ev is an error. */
             xf86Msg(X_ERROR, "%s: Read error: %s\n", pInfo->name, strerror(errno));
+
+            if (errno == ENODEV) /* May happen after resume */
+            {
+                xf86RemoveEnabledDevice(pInfo);
+                close(pInfo->fd);
+                pInfo->fd = -1;
+                pEvdev->reopen_left = pEvdev->reopen_attempts;
+                pEvdev->reopen_timer = TimerSet(NULL, 0, 100, EvdevReopenTimer, pInfo);
+            }
             break;
         }
 
@@ -306,9 +381,7 @@ EvdevReadInput(InputInfoPtr pInfo)
     }
 }
 
-#define LONG_BITS (sizeof(long) * 8)
-#define NBITS(x) (((x) + LONG_BITS - 1) / LONG_BITS)
-#define TestBit(bit, array) (array[(bit) / LONG_BITS]) & (1 << ((bit) % LONG_BITS))
+#define TestBit(bit, array) (array[(bit) / LONG_BITS]) & (1L << ((bit) % LONG_BITS))
 
 static void
 EvdevPtrCtrlProc(DeviceIntPtr device, PtrCtrl *ctrl)
@@ -826,6 +899,56 @@ EvdevInit(DeviceIntPtr device)
     return Success;
 }
 
+/**
+ * Init all extras (wheel emulation, etc.) and grab the device.
+ *
+ * Coming from a resume, the grab may fail with ENODEV. In this case, we set a
+ * timer to wake up and try to reopen the device later.
+ */
+static int
+EvdevOn(DeviceIntPtr device)
+{
+    InputInfoPtr pInfo;
+    EvdevPtr pEvdev;
+    int rc = 0;
+
+    pInfo = device->public.devicePrivate;
+    pEvdev = pInfo->private;
+
+    if (pInfo->fd != -1 && !pEvdev->kernel24 &&
+        (rc = ioctl(pInfo->fd, EVIOCGRAB, (void *)1)))
+    {
+        xf86Msg(X_WARNING, "%s: Grab failed (%s)\n", pInfo->name,
+                strerror(errno));
+
+        /* ENODEV - device has disappeared after resume */
+        if (rc && errno == ENODEV)
+        {
+            close(pInfo->fd);
+            pInfo->fd = -1;
+        }
+    }
+
+    if (pInfo->fd == -1)
+    {
+        pEvdev->reopen_left = pEvdev->reopen_attempts;
+        pEvdev->reopen_timer = TimerSet(NULL, 0, 100, EvdevReopenTimer, pInfo);
+    } else
+    {
+        xf86AddEnabledDevice(pInfo);
+        if ((pEvdev->flags & EVDEV_BUTTON_EVENTS) &&
+            !(pEvdev->flags & EVDEV_INITIALIZED))
+        {
+            EvdevMBEmuPreInit(pInfo);
+        }
+        pEvdev->flags |= EVDEV_INITIALIZED;
+        device->public.on = TRUE;
+    }
+
+    return Success;
+}
+
+
 static int
 EvdevProc(DeviceIntPtr device, int what)
 {
@@ -841,30 +964,35 @@ EvdevProc(DeviceIntPtr device, int what)
 	return EvdevInit(device);
 
     case DEVICE_ON:
-        if (!pEvdev->kernel24 && ioctl(pInfo->fd, EVIOCGRAB, (void *)1))
-            xf86Msg(X_WARNING, "%s: Grab failed (%s)\n", pInfo->name,
-                    strerror(errno));
-        if (errno != ENODEV)
-        {
-            xf86AddEnabledDevice(pInfo);
-            if (pEvdev->flags & EVDEV_BUTTON_EVENTS)
-                EvdevMBEmuPreInit(pInfo);
-            device->public.on = TRUE;
-        }
-	break;
+        return EvdevOn(device);
 
     case DEVICE_OFF:
-        if (!pEvdev->kernel24 && ioctl(pInfo->fd, EVIOCGRAB, (void *)0))
-            xf86Msg(X_WARNING, "%s: Release failed (%s)\n", pInfo->name,
-                    strerror(errno));
-        xf86RemoveEnabledDevice(pInfo);
-        EvdevMBEmuFinalize(pInfo);
+        if (pInfo->fd != -1)
+        {
+            if (!pEvdev->kernel24 && ioctl(pInfo->fd, EVIOCGRAB, (void *)0))
+                xf86Msg(X_WARNING, "%s: Release failed (%s)\n", pInfo->name,
+                        strerror(errno));
+            xf86RemoveEnabledDevice(pInfo);
+            close(pInfo->fd);
+            pInfo->fd = -1;
+        }
+        if (pEvdev->flags & EVDEV_INITIALIZED)
+            EvdevMBEmuFinalize(pInfo);
+        pEvdev->flags &= ~EVDEV_INITIALIZED;
 	device->public.on = FALSE;
+        if (pEvdev->reopen_timer)
+        {
+            TimerFree(pEvdev->reopen_timer);
+            pEvdev->reopen_timer = NULL;
+        }
 	break;
 
     case DEVICE_CLOSE:
 	xf86Msg(X_INFO, "%s: Close\n", pInfo->name);
-	close(pInfo->fd);
+        if (pInfo->fd != -1) {
+            close(pInfo->fd);
+            pInfo->fd = -1;
+        }
 	break;
     }
 
@@ -893,6 +1021,116 @@ EvdevConvert(InputInfoPtr pInfo, int first, int num, int v0, int v1, int v2,
     *y = (v1 - pEvdev->min_y) * screenHeight / (pEvdev->max_y - pEvdev->min_y);
 
     return TRUE;
+}
+/**
+ * Get as much information as we can from the fd and cache it.
+ * If compare is True, then the information retrieved will be compared to the
+ * one already cached. If the information does not match, then this function
+ * returns an error.
+ *
+ * @return Success if the information was cached, or !Success otherwise.
+ */
+static int
+EvdevCacheCompare(InputInfoPtr pInfo, Bool compare)
+{
+    EvdevPtr pEvdev = pInfo->private;
+    int i;
+
+    char name[1024]                  = {0};
+    long bitmask[NBITS(EV_MAX)]      = {0};
+    long key_bitmask[NBITS(KEY_MAX)] = {0};
+    long rel_bitmask[NBITS(REL_MAX)] = {0};
+    long abs_bitmask[NBITS(ABS_MAX)] = {0};
+    long led_bitmask[NBITS(LED_MAX)] = {0};
+    struct input_absinfo absinfo[ABS_MAX];
+
+    if (ioctl(pInfo->fd,
+              EVIOCGNAME(sizeof(name) - 1), name) < 0) {
+        xf86Msg(X_ERROR, "ioctl EVIOCGNAME failed: %s\n", strerror(errno));
+        goto error;
+    }
+
+    if (compare && strcmp(pEvdev->name, name))
+        goto error;
+
+    if (ioctl(pInfo->fd,
+              EVIOCGBIT(0, sizeof(bitmask)), bitmask) < 0) {
+        xf86Msg(X_ERROR, "ioctl EVIOCGNAME failed: %s\n", strerror(errno));
+        goto error;
+    }
+
+    if (compare && memcmp(pEvdev->bitmask, bitmask, sizeof(bitmask)))
+        goto error;
+
+
+    if (ioctl(pInfo->fd,
+              EVIOCGBIT(EV_REL, sizeof(rel_bitmask)), rel_bitmask) < 0) {
+        xf86Msg(X_ERROR, "ioctl EVIOCGBIT failed: %s\n", strerror(errno));
+        goto error;
+    }
+
+    if (compare && memcmp(pEvdev->rel_bitmask, rel_bitmask, sizeof(rel_bitmask)))
+        goto error;
+
+    if (ioctl(pInfo->fd,
+              EVIOCGBIT(EV_ABS, sizeof(abs_bitmask)), abs_bitmask) < 0) {
+        xf86Msg(X_ERROR, "ioctl EVIOCGBIT failed: %s\n", strerror(errno));
+        goto error;
+    }
+
+    if (compare && memcmp(pEvdev->abs_bitmask, abs_bitmask, sizeof(abs_bitmask)))
+        goto error;
+
+    if (ioctl(pInfo->fd,
+              EVIOCGBIT(EV_KEY, sizeof(key_bitmask)), key_bitmask) < 0) {
+        xf86Msg(X_ERROR, "ioctl EVIOCGBIT failed: %s\n", strerror(errno));
+        goto error;
+    }
+
+    if (compare && memcmp(pEvdev->key_bitmask, key_bitmask, sizeof(key_bitmask)))
+        goto error;
+
+    if (ioctl(pInfo->fd,
+              EVIOCGBIT(EV_LED, sizeof(led_bitmask)), led_bitmask) < 0) {
+        xf86Msg(X_ERROR, "ioctl EVIOCGBIT failed: %s\n", strerror(errno));
+        goto error;
+    }
+
+    if (compare && memcmp(pEvdev->led_bitmask, led_bitmask, sizeof(led_bitmask)))
+        goto error;
+
+    memset(absinfo, 0, sizeof(absinfo));
+
+    for (i = 0; i < ABS_MAX; i++)
+    {
+        if (TestBit(i, abs_bitmask))
+        {
+            if (ioctl(pInfo->fd, EVIOCGABS(i), &absinfo[i]) < 0) {
+                xf86Msg(X_ERROR, "ioctl EVIOCGABS failed: %s\n", strerror(errno));
+                goto error;
+            }
+        }
+    }
+
+    if (compare && memcmp(pEvdev->absinfo, absinfo, sizeof(absinfo)))
+            goto error;
+
+    /* cache info */
+    if (!compare)
+    {
+        strcpy(pEvdev->name, name);
+        memcpy(pEvdev->bitmask, bitmask, sizeof(bitmask));
+        memcpy(pEvdev->key_bitmask, key_bitmask, sizeof(key_bitmask));
+        memcpy(pEvdev->rel_bitmask, rel_bitmask, sizeof(rel_bitmask));
+        memcpy(pEvdev->abs_bitmask, abs_bitmask, sizeof(abs_bitmask));
+        memcpy(pEvdev->led_bitmask, led_bitmask, sizeof(led_bitmask));
+        memcpy(pEvdev->absinfo, absinfo, sizeof(absinfo));
+    }
+
+    return Success;
+
+error:
+    return !Success;
 }
 
 static int
@@ -1050,17 +1288,20 @@ EvdevPreInit(InputDriverPtr drv, IDevPtr dev, int flags)
         return NULL;
     }
 
+    pEvdev->device = device;
+
     xf86Msg(deviceFrom, "%s: Device: \"%s\"\n", pInfo->name, device);
     do {
         pInfo->fd = open(device, O_RDWR, 0);
-    }
-    while (pInfo->fd < 0 && errno == EINTR);
+    } while (pInfo->fd < 0 && errno == EINTR);
 
     if (pInfo->fd < 0) {
         xf86Msg(X_ERROR, "Unable to open evdev device \"%s\".\n", device);
 	xf86DeleteInput(pInfo, 0);
         return NULL;
     }
+
+    pEvdev->reopen_attempts = xf86SetIntOption(pInfo->options, "ReopenAttempts", 10);
 
     pEvdev->noXkb = noXkbExtension;
     /* parse the XKB options during kbd setup */
@@ -1070,6 +1311,8 @@ EvdevPreInit(InputDriverPtr drv, IDevPtr dev, int flags)
 	xf86DeleteInput(pInfo, 0);
         return NULL;
     }
+
+    EvdevCacheCompare(pInfo, FALSE); /* cache device data */
 
     return pInfo;
 }
